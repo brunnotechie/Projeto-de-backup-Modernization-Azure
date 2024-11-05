@@ -1,0 +1,145 @@
+# inventory.yml
+---
+all:
+  children:
+    azure_vms:
+      hosts:
+        vm-app1:
+          ansible_host: "{{ vm1_private_ip }}"
+        vm-app2:
+          ansible_host: "{{ vm2_private_ip }}"
+      vars:
+        ansible_user: azureadmin
+        ansible_password: "{{ vm_admin_password }}"
+        ansible_connection: winrm
+        ansible_winrm_server_cert_validation: ignore
+        storage_account: "{{ storage_account_name }}"
+        file_share: "{{ file_share_name }}"
+
+# site.yml
+---
+- name: Configure Azure VMs
+  hosts: azure_vms
+  gather_facts: yes
+  
+  vars_files:
+    - vars/main.yml
+    
+  tasks:
+    - name: Ensure PowerShell modules are installed
+      win_psmodule:
+        name: Az.Storage
+        state: present
+        
+    - name: Create directory for mounting
+      win_file:
+        path: Z:\
+        state: directory
+        
+    - name: Test SMB connectivity
+      win_shell: |
+        Test-NetConnection -ComputerName "{{ storage_account }}.file.core.windows.net" -Port 445
+      register: smb_test
+      
+    - name: Add storage account credentials
+      win_shell: |
+        cmdkey /add:{{ storage_account }}.file.core.windows.net /user:Azure\{{ storage_account }} /pass:{{ storage_key }}
+      when: smb_test.rc == 0
+      
+    - name: Mount Azure File Share
+      win_shell: |
+        New-PSDrive -Name "Z" -PSProvider FileSystem -Root "\\{{ storage_account }}.file.core.windows.net\{{ file_share }}" -Persist
+      when: smb_test.rc == 0
+      
+    - name: Configure Windows Firewall
+      win_firewall_rule:
+        name: SMB
+        localport: 445
+        action: allow
+        direction: in
+        protocol: tcp
+        state: present
+        enabled: yes
+        
+    - name: Install Windows Features
+      win_feature:
+        name:
+          - FS-FileServer
+          - Storage-Services
+        state: present
+        
+    - name: Configure Performance Monitor
+      win_shell: |
+        New-PerfCounterLog -Name "AzureFilesPerf" -Counter "\SMB Client Shares\*"
+        
+    - name: Configure Maintenance Tasks
+      win_scheduled_task:
+        name: ClearSMBCache
+        description: Clear SMB cache weekly
+        actions:
+          - path: powershell.exe
+            arguments: -ExecutionPolicy Bypass -File C:\scripts\clear-smb-cache.ps1
+        triggers:
+          - type: weekly
+            days_of_week: sun
+            start_boundary: '2024-01-01T03:00:00'
+        enabled: yes
+        
+    - name: Configure Azure Backup Agent
+      win_package:
+        path: https://download.microsoft.com/download/B/7/E/B7E3FB5E-7F3D-4C3C-9E4B-9E12E3B516D2/MARSAgentInstaller.exe
+        product_id: '{44AD1347-BEDB-4E83-A48C-C3102B656E7D}'
+        arguments: /q
+        state: present
+        
+# vars/main.yml
+---
+storage_key: "{{ lookup('env', 'STORAGE_KEY') }}"
+vm_admin_password: "{{ lookup('env', 'VM_ADMIN_PASSWORD') }}"
+
+# host_vars/vm-app1.yml
+---
+vm_role: primary
+backup_window: "00:00-06:00"
+
+# host_vars/vm-app2.yml
+---
+vm_role: secondary
+backup_window: "06:00-12:00"
+
+# roles/azure_files/tasks/main.yml
+---
+- name: Install Prerequisites
+  win_feature:
+    name:
+      - FS-FileServer
+      - Storage-Services
+    state: present
+    
+- name: Configure Azure Files
+  win_shell: |
+    # Configure Azure Files settings
+    $configPath = "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters"
+    Set-ItemProperty -Path $configPath -Name "DirectoryCacheEntriesMax" -Value 1000000
+    Set-ItemProperty -Path $configPath -Name "FileInfoCacheEntriesMax" -Value 1000000
+    Set-ItemProperty -Path $configPath -Name "FileNotFoundCacheEntriesMax" -Value 1000000
+    
+# roles/monitoring/tasks/main.yml
+---
+- name: Configure Azure Monitor Agent
+  win_shell: |
+    # Install Azure Monitor agent
+    Invoke-WebRequest -Uri https://go.microsoft.com/fwlink/?linkid=2192409 -OutFile AzureMonitorAgent.msi
+    Start-Process msiexec.exe -Wait -ArgumentList '/I AzureMonitorAgent.msi /qn'
+    
+- name: Configure Performance Counters
+  win_shell: |
+    # Configure performance counters for Azure Files monitoring
+    $counters = @(
+      "\SMB Client Shares\*",
+      "\Memory\Available MBytes",
+      "\Network Interface\Bytes Total/sec"
+    )
+    foreach ($counter in $counters) {
+      Add-Counter -Counter $counter -StorageAccount {{ storage_account }}
+    }
