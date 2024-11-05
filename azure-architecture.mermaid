@@ -1,0 +1,33 @@
+graph TD
+    subgraph "Data Center On-premises"
+        VM1[Servidor App 1]
+        VM2[Servidor App 2]
+        FS["/app-shared\nFile System Compartilhado"]
+        BK["Backup/restore em Fita"]
+        VM1 --> FS
+        VM2 --> FS
+        FS --> BK
+    end
+
+    subgraph "Microsoft Azure"
+        RG["Resource Group"]
+        
+        subgraph "Virtual Network"
+            SN["Subnet"]
+            AVM1["Azure VM 1"]
+            AVM2["Azure VM 2"]
+            SN --> AVM1
+            SN --> AVM2
+        end
+        
+        AF["Azure Files\n/app-shared"]
+        ARV["Azure Recovery Services Vault"]
+        
+        AVM1 --> AF
+        AVM2 --> AF
+        AF --> ARV
+        
+        RG --> Virtual Network
+        RG --> AF
+        RG --> ARV
+    end
