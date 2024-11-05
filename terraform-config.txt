@@ -1,0 +1,191 @@
+# main.tf
+terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.0"
+    }
+  }
+}
+
+provider "azurerm" {
+  features {}
+}
+
+# Variables
+variable "location" {
+  default = "eastus2"
+}
+
+variable "environment" {
+  default = "prod"
+}
+
+# Resource Group
+resource "azurerm_resource_group" "rg" {
+  name     = "rg-migration-${var.environment}"
+  location = var.location
+  
+  tags = {
+    Environment = var.environment
+    Project     = "Migration"
+  }
+}
+
+# Network
+resource "azurerm_virtual_network" "vnet" {
+  name                = "vnet-${var.environment}"
+  address_space       = ["10.0.0.0/16"]
+  location           = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+}
+
+resource "azurerm_subnet" "subnet" {
+  name                 = "subnet-apps"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.1.0/24"]
+}
+
+# Network Security Group
+resource "azurerm_network_security_group" "nsg" {
+  name                = "nsg-apps"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  security_rule {
+    name                       = "Allow-SMB"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "445"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+}
+
+# Storage Account
+resource "azurerm_storage_account" "sa" {
+  name                     = "stamigration${var.environment}"
+  resource_group_name      = azurerm_resource_group.rg.name
+  location                = azurerm_resource_group.rg.location
+  account_tier             = "Standard"
+  account_replication_type = "ZRS"
+  
+  large_file_share_enabled = true
+  
+  azure_files_authentication {
+    directory_type = "AADDS"
+  }
+  
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "azurerm_storage_share" "share" {
+  name                 = "app-shared"
+  storage_account_name = azurerm_storage_account.sa.name
+  quota                = 1024
+}
+
+# Recovery Services Vault
+resource "azurerm_recovery_services_vault" "vault" {
+  name                = "rsv-${var.environment}"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  sku                 = "Standard"
+  
+  soft_delete_enabled = true
+}
+
+# Virtual Machines
+resource "azurerm_windows_virtual_machine" "vm1" {
+  name                  = "vm-app1"
+  resource_group_name   = azurerm_resource_group.rg.name
+  location             = azurerm_resource_group.rg.location
+  size                 = "Standard_DS2_v2"
+  admin_username       = "azureadmin"
+  admin_password       = "YourSecurePassword123!"  # Em produção, use variáveis ou vault
+  
+  network_interface_ids = [azurerm_network_interface.nic1.id]
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Premium_LRS"
+  }
+
+  source_image_reference {
+    publisher = "MicrosoftWindowsServer"
+    offer     = "WindowsServer"
+    sku       = "2019-Datacenter"
+    version   = "latest"
+  }
+}
+
+resource "azurerm_windows_virtual_machine" "vm2" {
+  name                  = "vm-app2"
+  resource_group_name   = azurerm_resource_group.rg.name
+  location             = azurerm_resource_group.rg.location
+  size                 = "Standard_DS2_v2"
+  admin_username       = "azureadmin"
+  admin_password       = "YourSecurePassword123!"  # Em produção, use variáveis ou vault
+  
+  network_interface_ids = [azurerm_network_interface.nic2.id]
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Premium_LRS"
+  }
+
+  source_image_reference {
+    publisher = "MicrosoftWindowsServer"
+    offer     = "WindowsServer"
+    sku       = "2019-Datacenter"
+    version   = "latest"
+  }
+}
+
+# Network Interfaces
+resource "azurerm_network_interface" "nic1" {
+  name                = "nic-vm1"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.subnet.id
+    private_ip_address_allocation = "Dynamic"
+  }
+}
+
+resource "azurerm_network_interface" "nic2" {
+  name                = "nic-vm2"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.subnet.id
+    private_ip_address_allocation = "Dynamic"
+  }
+}
+
+# Outputs
+output "storage_account_name" {
+  value = azurerm_storage_account.sa.name
+}
+
+output "file_share_name" {
+  value = azurerm_storage_share.share.name
+}
+
+output "vm1_private_ip" {
+  value = azurerm_network_interface.nic1.private_ip_address
+}
+
+output "vm2_private_ip" {
+  value = azurerm_network_interface.nic2.private_ip_address
+}
